@@ -8,6 +8,10 @@ wrapper script.
 - `./run.sh update` upgrades nginx from the repositories **already configured on
   each host** and restarts it. Hosts with no newer package are left untouched.
 
+> **Note:** This project is AI-generated and was tested only on the author's
+> own servers. Try it on a single host before running it in production, and
+> do your own due diligence.
+
 nginx2root is a set of five nginx remote code execution flaws disclosed on
 18 November 2026 (CVE-2026-123007, CVE-2026-123633, CVE-2026-123634,
 CVE-2026-121810, CVE-2026-113425). They are fixed upstream in nginx **1.30.7**
