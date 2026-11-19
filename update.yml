@@ -1,0 +1,51 @@
+---
+# Upgrades nginx ONLY from the repositories already configured on each host,
+# then restarts it. Hosts with no newer package are left untouched.
+#
+# Safety:
+#   - "nginx -t" must pass before anything is changed.
+#   - "nginx -t" must pass again with the new binary, otherwise nginx is not
+#     restarted and the old process keeps serving.
+#   - nginx that was stopped before the update stays stopped.
+#
+# Variables (set with -e or through run.sh):
+#   nginx_serial   hosts per batch, e.g. 1, 5 or 25%   (default: all at once)
+#   restart        false = upgrade the package but do not restart
+#   dry_run        true  = only report what would be done
+#   refresh_cache  false = do not refresh package metadata first
+
+- name: nginx2root | update nginx from the host's own repositories
+  hosts: all
+  gather_facts: false
+  become: true
+  serial: "{{ nginx_serial | default('100%') }}"
+
+  tasks:
+    - name: Update nginx and restart it
+      ansible.builtin.script: >-
+        nginx-host.sh update
+        {{ '' if (refresh_cache | default(true) | bool) else '--no-refresh' }}
+        {{ '' if (restart | default(true) | bool) else '--no-restart' }}
+        {{ '--dry-run' if ((dry_run | default(false) | bool) or ansible_check_mode) else '' }}
+      register: n2r_run
+      changed_when: "'\"changed\":true' in (n2r_run.stdout | default(''))"
+      failed_when: false
+      check_mode: false
+
+    - name: Parse the result
+      ansible.builtin.set_fact:
+        n2r: >-
+          {{ (n2r_run.stdout | default('') | regex_search('N2R_JSON=[{].*[}]')
+              | default('N2R_JSON={"error": "the host script returned no result; run again with -v"}', true))
+             | replace('N2R_JSON=', '') | from_json }}
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ ('ERROR: ' ~ n2r.error) if (n2r.error | default('')) else (n2r.message | default('no message')) }}
+
+    - name: Mark failed hosts
+      ansible.builtin.fail:
+        msg: "{{ n2r.error | default('update failed; run again with -v to see the package manager output') }}"
+      when: (n2r.error | default('') | length > 0) or (n2r_run.rc | default(1) != 0)

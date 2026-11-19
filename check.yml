@@ -1,0 +1,64 @@
+---
+# Read-only. Reports the nginx version and nginx2root patch status of every host.
+# The only thing it touches is the package manager's metadata cache
+# (apt-get update and friends); pass -e refresh_cache=false to skip even that.
+
+- name: nginx2root | check nginx version and patch status
+  hosts: all
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Probe the host
+      ansible.builtin.script: >-
+        nginx-host.sh check
+        {{ '' if (refresh_cache | default(true) | bool) else '--no-refresh' }}
+      register: n2r_run
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Parse the result
+      ansible.builtin.set_fact:
+        n2r: >-
+          {{ (n2r_run.stdout | default('') | regex_search('N2R_JSON=[{].*[}]')
+              | default('N2R_JSON={"error": "the host script returned no result; run again with -v"}', true))
+             | replace('N2R_JSON=', '') | from_json }}
+
+    - name: Stop on hosts where the probe failed
+      ansible.builtin.fail:
+        msg: "{{ n2r.error | default('probe failed') }}"
+      when: (n2r.error | default('') | length > 0) or (n2r_run.rc | default(1) != 0)
+
+    - name: Summary
+      run_once: true
+      ansible.builtin.debug:
+        msg: "{{ n2r_table.splitlines() }}"
+      vars:
+        n2r_table: |-
+          {{ '%-26s %-9s %-9s %-14s %-7s %-6s %s' | format('HOST', 'ON DISK', 'RUNNING', 'STATUS', 'UPDATE', 'HTTP/2', 'NOTES') }}
+          {% for h in ansible_play_hosts %}
+          {% set r = hostvars[h].n2r | default({}) %}
+          {% set notes = [] %}
+          {% if r.candidate | default('') %}{% set _ = notes.append('repo offers ' ~ r.candidate) %}{% endif %}
+          {% if r.restart_needed | default('no') == 'yes' %}{% set _ = notes.append('RESTART NEEDED (old binary still running)') %}{% endif %}
+          {% if r.status | default('') == 'unverified' %}{% set _ = notes.append('no changelog, check the distro advisory') %}{% endif %}
+          {% if r.status | default('') == 'check-vendor' %}{% set _ = notes.append(r.flavor ~ ', check the vendor advisory') %}{% endif %}
+          {% if r.pkg_manager | default('none') == 'none' and r.installed | default('no') == 'yes' %}{% set _ = notes.append('not installed from a package') %}{% endif %}
+          {% if r.http3 | default('') == 'on' %}{% set _ = notes.append('HTTP/3 on') %}{% endif %}
+          {% if r.container_nginx | default('0') != '0' %}{% set _ = notes.append(r.container_nginx ~ ' nginx in containers, rebuild those images') %}{% endif %}
+          {% if r.sctp | default('') in ['loaded', 'loadable'] %}{% set _ = notes.append('sctp ' ~ r.sctp) %}{% endif %}
+          {{ '%-26s %-9s %-9s %-14s %-7s %-6s %s' | format(h, r.version | default('') or '-', r.running_version | default('') or '-', r.status | default('?'), r['update'] | default('?'), r.http2 | default('?'), notes | join('; ')) }}
+          {% endfor %}
+          {% for h in ansible_play_hosts_all | difference(ansible_play_hosts) %}
+          {{ '%-26s %s' | format(h, 'FAILED OR UNREACHABLE, see the errors above') }}
+          {% endfor %}
+
+    - name: Fail on hosts that still need action (--strict)
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} needs action:
+          status={{ n2r.status }}, restart_needed={{ n2r.restart_needed }}
+      when:
+        - fail_on_vulnerable | default(false) | bool
+        - n2r.status in ['vulnerable', 'unverified', 'check-vendor'] or n2r.restart_needed == 'yes'
